@@ -1,111 +1,183 @@
 from pymodbus.client import ModbusTcpClient
 from pymodbus.exceptions import ModbusIOException, ConnectionException
 import time
+# from pymodbus.payload import BinaryPayloadDecoder, BinaryPayloadBuilder # Removed deprecated imports
+# Remove ModbusDataTypes from import as it's accessed via client instance
+from pymodbus.constants import Endian 
 
-# These should match the definitions in zone_simulator.py
-REG_CURRENT_TEMP = 0
-REG_TARGET_TEMP = 1
-REG_OCCUPANCY = 2
-REG_HEATER_STATUS = 3
+# Register Addresses from Simulator (all are single Holding Registers)
+SIM_REG_CURRENT_TEMP = 0
+SIM_REG_TARGET_TEMP = 1
+SIM_REG_OCCUPANCY = 2
+SIM_REG_HEATER_STATUS = 3
+# Total registers in the simulator block relevant to us for reading in one go might be 4
+SIM_TOTAL_REGISTERS_TO_READ = 4 
 
-# Scaling factor used in the simulator
-TEMP_SCALING_FACTOR = 10.0
+DEFAULT_MODBUS_PORT = 5020 # Default port if not specified
+TEMP_SCALING_FACTOR = 10.0 # As used in simulator
 
-def read_zone_data_from_modbus(host: str, port: int, slave_id: int = 1) -> dict:
-    """
-    Connects to a Modbus TCP slave (zone simulator) and reads relevant data.
+# Custom Exceptions
+class ModbusConnectionError(Exception):
+    """Custom exception for Modbus connection failures."""
+    pass
 
-    Args:
-        host: The hostname or IP address of the Modbus slave.
-        port: The port number of the Modbus slave.
-        slave_id: The Modbus slave ID (unit ID).
+class ModbusReadError(Exception):
+    """Custom exception for Modbus read failures."""
+    pass
 
-    Returns:
-        A dictionary containing {"temperature": float, "occupancy": bool, "target_temperature": float, "heater_on": bool}
-        or {"error": str} if an error occurs.
-    """
-    client = ModbusTcpClient(host, port=port, timeout=3) # timeout in seconds
+class ModbusWriteError(Exception):
+    """Custom exception for Modbus write failures."""
+    pass
+
+# Helper function to handle client connection and closing
+def _execute_modbus_operation(host, port, operation_callback):
+    effective_port = port if port is not None else DEFAULT_MODBUS_PORT
+    client = ModbusTcpClient(host, port=effective_port)
     try:
         if not client.connect():
-            return {"error": f"Failed to connect to Modbus slave at {host}:{port}"}
-
-        # Read multiple holding registers: current temp, target temp, occupancy, heater status
-        # Address = starting register address (0-indexed)
-        # Count = number of registers to read
-        # Unit = slave ID
-        response = client.read_holding_registers(address=REG_CURRENT_TEMP, count=4, slave=slave_id)
-
-        if response.isError():
-            return {"error": f"Modbus error reading registers: {response}"}
-
-        if not response.registers or len(response.registers) < 4:
-            return {"error": "Modbus response did not contain enough registers"}
-
-        # Register 0: Current Temperature (scaled)
-        # Register 1: Target Temperature (scaled)
-        # Register 2: Occupancy (0 or 1)
-        # Register 3: Heater Status (0 or 1)
-        
-        current_temp_scaled = response.registers[REG_CURRENT_TEMP]
-        target_temp_scaled = response.registers[REG_TARGET_TEMP]
-        occupancy_val = response.registers[REG_OCCUPANCY]
-        heater_status_val = response.registers[REG_HEATER_STATUS]
-
-        data = {
-            "temperature": round(current_temp_scaled / TEMP_SCALING_FACTOR, 2),
-            "target_temperature": round(target_temp_scaled / TEMP_SCALING_FACTOR, 2),
-            "occupancy": True if occupancy_val == 1 else False,
-            "heater_on": True if heater_status_val == 1 else False
-        }
-        return data
-
-    except ConnectionException as e:
-        return {"error": f"Connection exception with Modbus slave at {host}:{port}: {e}"}
-    except ModbusIOException as e:
-        return {"error": f"Modbus IO exception with slave at {host}:{port}: {e}"}
+            raise ModbusConnectionError(f"Failed to connect to Modbus server at {host}:{effective_port}")
+        return operation_callback(client)
+    except ConnectionException as e: # Catch pymodbus specific connection exception
+        raise ModbusConnectionError(f"Modbus connection failed for {host}:{effective_port}: {e}")
     except Exception as e:
-        return {"error": f"Unexpected error communicating with Modbus slave at {host}:{port}: {e}"}
+        if isinstance(e, (ModbusReadError, ModbusWriteError)):
+            raise 
+        print(f"An unexpected error occurred during Modbus operation with {host}:{effective_port}: {e}")
+        raise 
     finally:
         if client.is_socket_open():
             client.close()
 
-def write_target_temp_to_modbus(host: str, port: int, target_temp: float, slave_id: int = 1) -> dict:
-    """
-    Connects to a Modbus TCP slave and writes the target temperature.
+# --- Individual Read Functions (Updated to match simulator's holding registers) ---
 
-    Args:
-        host: The hostname or IP address of the Modbus slave.
-        port: The port number of the Modbus slave.
-        target_temp: The target temperature to set.
-        slave_id: The Modbus slave ID (unit ID).
+def read_current_temperature(host: str, port: int) -> float | None:
+    def operation(client):
+        rr = client.read_holding_registers(SIM_REG_CURRENT_TEMP, count=1, slave=1)
+        if rr.isError():
+            raise ModbusReadError(f"Failed to read current temperature (reg {SIM_REG_CURRENT_TEMP}) from {host}:{port}. Error: {rr}")
+        scaled_value = rr.registers[0]
+        return round(float(scaled_value) / TEMP_SCALING_FACTOR, 2)
+    try:
+        return _execute_modbus_operation(host, port, operation)
+    except (ModbusConnectionError, ModbusReadError) as e:
+        print(f"Error in read_current_temperature: {e}")
+        return None
 
-    Returns:
-        A dictionary {"success": True} or {"error": str}.
+def read_target_temperature(host: str, port: int) -> float | None:
+    def operation(client):
+        rr = client.read_holding_registers(SIM_REG_TARGET_TEMP, count=1, slave=1)
+        if rr.isError():
+            raise ModbusReadError(f"Failed to read target temperature (reg {SIM_REG_TARGET_TEMP}) from {host}:{port}. Error: {rr}")
+        scaled_value = rr.registers[0]
+        return round(float(scaled_value) / TEMP_SCALING_FACTOR, 2)
+    try:
+        return _execute_modbus_operation(host, port, operation)
+    except (ModbusConnectionError, ModbusReadError) as e:
+        print(f"Error in read_target_temperature: {e}")
+        return None
+
+def read_heater_status(host: str, port: int) -> bool | None:
+    def operation(client):
+        rr = client.read_holding_registers(SIM_REG_HEATER_STATUS, count=1, slave=1)
+        if rr.isError():
+            raise ModbusReadError(f"Failed to read heater status (reg {SIM_REG_HEATER_STATUS}) from {host}:{port}. Error: {rr}")
+        return bool(rr.registers[0]) # 1 is True, 0 is False
+    try:
+        return _execute_modbus_operation(host, port, operation)
+    except (ModbusConnectionError, ModbusReadError) as e:
+        print(f"Error in read_heater_status: {e}")
+        return None
+
+def read_occupancy_status(host: str, port: int) -> bool | None:
+    def operation(client):
+        rr = client.read_holding_registers(SIM_REG_OCCUPANCY, count=1, slave=1)
+        if rr.isError():
+            raise ModbusReadError(f"Failed to read occupancy status (reg {SIM_REG_OCCUPANCY}) from {host}:{port}. Error: {rr}")
+        return bool(rr.registers[0]) # 1 is True, 0 is False
+    try:
+        return _execute_modbus_operation(host, port, operation)
+    except (ModbusConnectionError, ModbusReadError) as e:
+        print(f"Error in read_occupancy_status: {e}")
+        return None
+
+# --- Write Functions (Target Temp to holding register, Heater to holding register) ---
+
+def write_target_temperature(host: str, port: int, temp: float) -> bool:
+    def operation(client):
+        scaled_value = int(round(temp * TEMP_SCALING_FACTOR))
+        # Write a single holding register
+        rq = client.write_register(SIM_REG_TARGET_TEMP, scaled_value, slave=1) 
+        if rq.isError():
+            raise ModbusWriteError(f"Failed to write target temperature to {host}:{port}. Error: {rq}")
+        return True
+    try:
+        return _execute_modbus_operation(host, port, operation)
+    except (ModbusConnectionError, ModbusWriteError) as e:
+        print(f"Error in write_target_temperature: {e}")
+        return False
+
+def write_heater_state(host: str, port: int, state: bool) -> bool:
+    # Note: The simulator primarily controls its own heater_on state based on its logic.
+    # Writing heater state directly might conflict or be overridden by the simulator.
+    # However, if the simulator were designed to accept external heater commands via a register, this would be how.
+    # Let's assume for now that the simulator's REG_HEATER_STATUS is *readable* but not typically *writable* by client,
+    # as the simulator manages it. If it needs to be writable, the simulator logic would need to accommodate that.
+    # For now, let's make this write to the holding register as if it were supported.
+    def operation(client):
+        value = 1 if state else 0
+        rq = client.write_register(SIM_REG_HEATER_STATUS, value, slave=1)
+        if rq.isError():
+            raise ModbusWriteError(f"Failed to write heater state to {host}:{port}. Error: {rq}")
+        return True
+    try:
+        return _execute_modbus_operation(host, port, operation)
+    except (ModbusConnectionError, ModbusWriteError) as e:
+        print(f"Error in write_heater_state: {e}")
+        return False
+
+# Combined function to read all relevant data for SensorData table or control logic initial state
+def read_zone_data_from_modbus(host: str, port: int) -> dict:
     """
-    client = ModbusTcpClient(host, port=port, timeout=3)
+    Reads current temperature, target temperature, heater status, and occupancy 
+    from a zone's holding registers, matching the simulator's setup.
+    Returns a dictionary with the data or an error key.
+    """
+    data = {}
+    effective_port = port if port is not None else DEFAULT_MODBUS_PORT
+    client = ModbusTcpClient(host, port=effective_port)
     try:
         if not client.connect():
-            return {"error": f"Failed to connect to Modbus slave at {host}:{port} for writing"}
+            raise ModbusConnectionError(f"Failed to connect to Modbus server at {host}:{effective_port} for read_zone_data")
 
-        scaled_target_temp = int(round(target_temp * TEMP_SCALING_FACTOR))
+        # Read a block of 4 holding registers starting from SIM_REG_CURRENT_TEMP (address 0)
+        # This covers CurrentTemp, TargetTemp, Occupancy, HeaterStatus
+        rr = client.read_holding_registers(SIM_REG_CURRENT_TEMP, count=SIM_TOTAL_REGISTERS_TO_READ, slave=1)
+        if rr.isError():
+            raise ModbusReadError(f"Modbus error reading block of registers: {rr}")
         
-        # Write single holding register: REG_TARGET_TEMP
-        # Address = register address (0-indexed)
-        # Value = value to write
-        # Unit = slave ID
-        response = client.write_register(address=REG_TARGET_TEMP, value=scaled_target_temp, slave=slave_id)
+        if len(rr.registers) < SIM_TOTAL_REGISTERS_TO_READ:
+            raise ModbusReadError(f"Modbus read returned too few registers. Expected {SIM_TOTAL_REGISTERS_TO_READ}, got {len(rr.registers)}")
 
-        if response.isError():
-            return {"error": f"Modbus error writing target temperature: {response}"}
+        # Extract and process values based on their known positions and scaling
+        data["temperature"] = round(float(rr.registers[SIM_REG_CURRENT_TEMP]) / TEMP_SCALING_FACTOR, 2) # Index 0
+        data["target_temperature"] = round(float(rr.registers[SIM_REG_TARGET_TEMP]) / TEMP_SCALING_FACTOR, 2) # Index 1
+        data["occupancy"] = bool(rr.registers[SIM_REG_OCCUPANCY]) # Index 2
+        data["heater_on"] = bool(rr.registers[SIM_REG_HEATER_STATUS]) # Index 3
         
-        return {"success": True, "message": f"Target temperature {target_temp}°C written to {host}:{port}"}
-
-    except ConnectionException as e:
-        return {"error": f"Connection exception writing to Modbus slave at {host}:{port}: {e}"}
-    except ModbusIOException as e:
-        return {"error": f"Modbus IO exception writing to slave at {host}:{port}: {e}"}
+        return data
+    
+    except ModbusConnectionError as e:
+        print(f"Modbus Connection Error in read_zone_data_from_modbus for {host}:{effective_port}: {e}")
+        return {"error": str(e), "details": "Connection failed"}
+    except ModbusReadError as e:
+        print(f"Modbus Read Error in read_zone_data_from_modbus for {host}:{effective_port}: {e}")
+        return {"error": str(e), "details": "Read operation failed"}
+    except IndexError as e: # Catch if we try to access a register index that wasn't returned
+        print(f"Modbus Read Error (IndexError) in read_zone_data_from_modbus for {host}:{effective_port}: {e}. Likely too few registers returned.")
+        return {"error": str(e), "details": "Not enough registers returned from read operation"}
     except Exception as e:
-        return {"error": f"Unexpected error writing to Modbus slave at {host}:{port}: {e}"}
+        print(f"Unexpected error in read_zone_data_from_modbus for {host}:{effective_port}: {e}")
+        return {"error": str(e), "details": "Unexpected failure"}
     finally:
         if client.is_socket_open():
             client.close()
@@ -113,10 +185,9 @@ def write_target_temp_to_modbus(host: str, port: int, target_temp: float, slave_
 if __name__ == '__main__':
     # Example Usage (assumes a zone_simulator is running on localhost:5020)
     sim_host = "localhost"
-    sim_port_zone1 = 5020
-    sim_port_zone2 = 5021 # If you have a second simulator
+    sim_port_zone1 = DEFAULT_MODBUS_PORT 
 
-    print(f"--- Reading data from Zone 1 (Port {sim_port_zone1}) ---")
+    print(f"--- Reading data from Zone 1 (Port {sim_port_zone1}) --- ({time.time()})")
     zone1_data = read_zone_data_from_modbus(sim_host, sim_port_zone1)
     if "error" in zone1_data:
         print(f"Error reading from Zone 1: {zone1_data['error']}")
@@ -125,31 +196,43 @@ if __name__ == '__main__':
 
     time.sleep(1)
 
-    print(f"\n--- Writing new target temperature to Zone 1 (Port {sim_port_zone1}) ---")
+    print(f"\n--- Writing new target temperature to Zone 1 (Port {sim_port_zone1}) --- ({time.time()})")
     new_target = 23.5
-    write_result = write_target_temp_to_modbus(sim_host, sim_port_zone1, new_target)
-    if "error" in write_result:
-        print(f"Error writing to Zone 1: {write_result['error']}")
+    write_result_flag = write_target_temperature(sim_host, sim_port_zone1, new_target)
+    if not write_result_flag:
+        print(f"Error writing to Zone 1 (returned False)")
     else:
-        print(f"Write to Zone 1 successful: {write_result.get('message')}")
+        print(f"Write Target Temp ({new_target}) to Zone 1 successful (returned True)")
 
     time.sleep(1)
 
-    print(f"\n--- Reading data again from Zone 1 (Port {sim_port_zone1}) to verify change ---")
+    print(f"\n--- Reading data again from Zone 1 (Port {sim_port_zone1}) to verify change --- ({time.time()})")
     zone1_data_after_write = read_zone_data_from_modbus(sim_host, sim_port_zone1)
     if "error" in zone1_data_after_write:
         print(f"Error reading from Zone 1: {zone1_data_after_write['error']}")
     else:
         print(f"Zone 1 Data after write: {zone1_data_after_write}")
-        if zone1_data_after_write.get("target_temperature") == new_target:
+        if abs(zone1_data_after_write.get("target_temperature", 999) - new_target) < 0.01:
             print(f"SUCCESS: Target temperature for Zone 1 correctly updated to {new_target}°C.")
         else:
-            print(f"VERIFICATION FAILED: Target temperature for Zone 1 is {zone1_data_after_write.get("target_temperature")}, expected {new_target}°C.")
+            print(f"VERIFICATION FAILED: Target temperature for Zone 1 is {zone1_data_after_write.get('target_temperature')}, expected {new_target}°C.")
 
-    # Example for Zone 2 if running
-    # print(f"\n--- Reading data from Zone 2 (Port {sim_port_zone2}) ---")
-    # zone2_data = read_zone_data_from_modbus(sim_host, sim_port_zone2)
-    # if "error" in zone2_data:
-    #     print(f"Error reading from Zone 2: {zone2_data['error']}")
-    # else:
-    #     print(f"Zone 2 Data: {zone2_data}") 
+    print(f"\n--- Toggling heater state (example, may be overridden by sim) --- ({time.time()})")
+    # Read current heater state first
+    current_heater_state = read_heater_status(sim_host, sim_port_zone1)
+    if current_heater_state is not None:
+        print(f"Current heater state: {current_heater_state}")
+        write_heater_result = write_heater_state(sim_host, sim_port_zone1, not current_heater_state)
+        print(f"Attempted to write heater state to '{not current_heater_state}': {'Success' if write_heater_result else 'Failed'}")
+        time.sleep(0.5)
+        new_heater_state = read_heater_status(sim_host, sim_port_zone1)
+        print(f"New heater state after write attempt: {new_heater_state}")
+    else:
+        print("Could not read current heater state to toggle.")
+
+    print(f"\n--- Reading occupancy status (example) --- ({time.time()})")
+    occupancy = read_occupancy_status(sim_host, sim_port_zone1)
+    if occupancy is not None:
+        print(f"Zone 1 Occupancy: {occupancy}")
+    else:
+        print("Could not read Zone 1 occupancy.") 

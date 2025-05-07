@@ -28,7 +28,12 @@ class ZoneSimulator:
         self.current_temperature = initial_temp
         self.target_temperature = initial_target_temp
         self.is_occupied = initial_occupancy
-        self.heater_on = False # True if the heater is currently active
+        # self.heater_on = False # True if the heater is currently active
+        # Initialize heater_on based on initial conditions
+        if self.current_temperature < self.target_temperature - 0.5: # Consistent with turn-on logic
+            self.heater_on = True
+        else:
+            self.heater_on = False
         
         self._stop_event = threading.Event()
         self._simulation_thread = None

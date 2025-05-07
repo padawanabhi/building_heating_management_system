@@ -1,5 +1,5 @@
 import requests
-from .config import WEATHERAPI_KEY
+from .config import settings
 
 WEATHERAPI_BASE_URL = "http://api.weatherapi.com/v1"
 
@@ -14,7 +14,7 @@ def get_weather_forecast(location: str, days: int = 1) -> dict:
     Returns:
         A dictionary containing the forecast data or an error message.
     """
-    if not WEATHERAPI_KEY:
+    if not settings.WEATHERAPI_KEY:
         return {"error": "WeatherAPI key not configured."}
 
     if not 1 <= days <= 14:
@@ -23,7 +23,7 @@ def get_weather_forecast(location: str, days: int = 1) -> dict:
         return {"error": "Number of forecast days must be between 1 and 14."}
 
     params = {
-        "key": WEATHERAPI_KEY,
+        "key": settings.WEATHERAPI_KEY,
         "q": location,
         "days": days,
         "aqi": "no",  # Air Quality Data - can be 'yes' or 'no'

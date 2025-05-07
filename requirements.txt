@@ -6,4 +6,10 @@ python-dotenv
 requests
 pymodbus
 apscheduler
-streamlit 
+streamlit
+pandas
+openmeteo-requests
+requests-cache     # For optional simulation caching
+retry-requests     # For optional simulation retries
+pydantic-settings  # For Pydantic V2 settings management
+httpx
