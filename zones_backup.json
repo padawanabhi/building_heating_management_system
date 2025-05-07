@@ -1,0 +1,242 @@
+[
+    {
+        "id": 1,
+        "name": "Living Room",
+        "weather_location": "New York",
+        "latitude": 40.7128,
+        "longitude": -74.006,
+        "preferences": {
+            "schedule": [
+                {
+                    "time": "00:00",
+                    "occupied_temp": 18.0,
+                    "unoccupied_temp": 16.0
+                },
+                {
+                    "time": "07:00",
+                    "occupied_temp": 21.0,
+                    "unoccupied_temp": 17.0
+                }
+            ],
+            "default_occupied_temp": 21.0,
+            "default_unoccupied_temp": 17.0,
+            "min_target_temp": 15.0,
+            "max_target_temp": 25.0,
+            "peak_occupied_temp_reduction": 0.5,
+            "super_peak_occupied_temp_reduction": 1.0,
+            "allow_off_peak_preconditioning": true,
+            "off_peak_occupied_temp_increase": 0.5,
+            "allow_predictive_control": true,
+            "predictive_window_hours": 3,
+            "predictive_temp_drop_threshold": 1.0,
+            "predictive_preheat_increase": 0.7,
+            "predictive_temp_rise_threshold": 1.0,
+            "predictive_avoid_overheat_reduction": 0.7,
+            "prioritize_comfort_over_peak_cost": false,
+            "max_combined_preheat_boost": 1.5,
+            "high_outside_temp_threshold": 21.0,
+            "occupied_temp_reduction_high_outside": 1.0,
+            "heating_rate_degC_per_hour": 1.0,
+            "cooling_rate_factor_per_hour": 0.2
+        },
+        "modbus_port": 5020,
+        "modbus_host": "localhost"
+    },
+    {
+        "id": 2,
+        "name": "Bedroom",
+        "weather_location": "London",
+        "latitude": 51.5074,
+        "longitude": -0.0796,
+        "preferences": {
+            "schedule": [
+                {
+                    "time": "00:00",
+                    "occupied_temp": 19.0,
+                    "unoccupied_temp": 16.5
+                },
+                {
+                    "time": "06:00",
+                    "occupied_temp": 20.0,
+                    "unoccupied_temp": 17.0
+                },
+                {
+                    "time": "22:00",
+                    "occupied_temp": 19.5,
+                    "unoccupied_temp": 17.0
+                }
+            ],
+            "default_occupied_temp": 20.0,
+            "default_unoccupied_temp": 17.0,
+            "min_target_temp": 16.0,
+            "max_target_temp": 24.0,
+            "peak_occupied_temp_reduction": 0.5,
+            "super_peak_occupied_temp_reduction": 1.0,
+            "allow_off_peak_preconditioning": true,
+            "off_peak_occupied_temp_increase": 0.5,
+            "allow_predictive_control": true,
+            "predictive_window_hours": 4,
+            "predictive_temp_drop_threshold": 1.5,
+            "predictive_preheat_increase": 0.6,
+            "predictive_temp_rise_threshold": 2.0,
+            "predictive_avoid_overheat_reduction": 0.5,
+            "prioritize_comfort_over_peak_cost": false,
+            "max_combined_preheat_boost": 1.5,
+            "high_outside_temp_threshold": 21.0,
+            "occupied_temp_reduction_high_outside": 1.0,
+            "heating_rate_degC_per_hour": 1.0,
+            "cooling_rate_factor_per_hour": 0.2
+        },
+        "modbus_port": 5021,
+        "modbus_host": "localhost"
+    },
+    {
+        "id": 3,
+        "name": "Kitchen",
+        "weather_location": "Berlin",
+        "latitude": 52.52,
+        "longitude": 13.405,
+        "preferences": {
+            "schedule": [
+                {
+                    "time": "00:00",
+                    "occupied_temp": 18.0,
+                    "unoccupied_temp": 15.0
+                },
+                {
+                    "time": "06:30",
+                    "occupied_temp": 20.0,
+                    "unoccupied_temp": 16.0
+                },
+                {
+                    "time": "17:00",
+                    "occupied_temp": 20.5,
+                    "unoccupied_temp": 16.0
+                },
+                {
+                    "time": "21:00",
+                    "occupied_temp": 19.0,
+                    "unoccupied_temp": 15.0
+                }
+            ],
+            "default_occupied_temp": 20.0,
+            "default_unoccupied_temp": 16.0,
+            "min_target_temp": 15.0,
+            "max_target_temp": 24.0,
+            "peak_occupied_temp_reduction": 0.6,
+            "super_peak_occupied_temp_reduction": 1.1,
+            "allow_off_peak_preconditioning": true,
+            "off_peak_occupied_temp_increase": 0.6,
+            "allow_predictive_control": true,
+            "predictive_window_hours": 4,
+            "predictive_temp_drop_threshold": 1.8,
+            "predictive_preheat_increase": 0.7,
+            "predictive_temp_rise_threshold": 2.0,
+            "predictive_avoid_overheat_reduction": 0.5,
+            "prioritize_comfort_over_peak_cost": false,
+            "max_combined_preheat_boost": 1.5,
+            "high_outside_temp_threshold": 21.0,
+            "occupied_temp_reduction_high_outside": 1.0,
+            "heating_rate_degC_per_hour": 1.0,
+            "cooling_rate_factor_per_hour": 0.2
+        },
+        "modbus_port": 5022,
+        "modbus_host": "localhost"
+    },
+    {
+        "id": 4,
+        "name": "Guest Room",
+        "weather_location": "New Delhi",
+        "latitude": 28.6139,
+        "longitude": 77.209,
+        "preferences": {
+            "schedule": [
+                {
+                    "time": "00:00",
+                    "occupied_temp": 20.0,
+                    "unoccupied_temp": 18.0
+                },
+                {
+                    "time": "07:00",
+                    "occupied_temp": 22.0,
+                    "unoccupied_temp": 19.0
+                }
+            ],
+            "default_occupied_temp": 22.0,
+            "default_unoccupied_temp": 19.0,
+            "min_target_temp": 18.0,
+            "max_target_temp": 26.0,
+            "peak_occupied_temp_reduction": 0.5,
+            "super_peak_occupied_temp_reduction": 1.0,
+            "allow_off_peak_preconditioning": false,
+            "off_peak_occupied_temp_increase": 0.3,
+            "allow_predictive_control": true,
+            "predictive_window_hours": 3,
+            "predictive_temp_drop_threshold": 2.0,
+            "predictive_preheat_increase": 0.4,
+            "predictive_temp_rise_threshold": 1.5,
+            "predictive_avoid_overheat_reduction": 0.6,
+            "prioritize_comfort_over_peak_cost": false,
+            "max_combined_preheat_boost": 1.5,
+            "high_outside_temp_threshold": 21.0,
+            "occupied_temp_reduction_high_outside": 1.0,
+            "heating_rate_degC_per_hour": 1.0,
+            "cooling_rate_factor_per_hour": 0.2
+        },
+        "modbus_port": 5023,
+        "modbus_host": "localhost"
+    },
+    {
+        "id": 5,
+        "name": "Dinning Room",
+        "weather_location": "Sydney",
+        "latitude": -33.8688,
+        "longitude": 151.2153,
+        "preferences": {
+            "schedule": [
+                {
+                    "time": "00:00",
+                    "occupied_temp": 20.0,
+                    "unoccupied_temp": 18.5
+                },
+                {
+                    "time": "07:00",
+                    "occupied_temp": 21.0,
+                    "unoccupied_temp": 19.0
+                },
+                {
+                    "time": "18:00",
+                    "occupied_temp": 22.0,
+                    "unoccupied_temp": 19.5
+                },
+                {
+                    "time": "22:00",
+                    "occupied_temp": 19.0,
+                    "unoccupied_temp": 17.0
+                }
+            ],
+            "default_occupied_temp": 21.0,
+            "default_unoccupied_temp": 19.0,
+            "min_target_temp": 17.0,
+            "max_target_temp": 27.0,
+            "peak_occupied_temp_reduction": 0.4,
+            "super_peak_occupied_temp_reduction": 0.8,
+            "allow_off_peak_preconditioning": false,
+            "off_peak_occupied_temp_increase": 0.3,
+            "allow_predictive_control": true,
+            "predictive_window_hours": 3,
+            "predictive_temp_drop_threshold": 2.0,
+            "predictive_preheat_increase": 0.4,
+            "predictive_temp_rise_threshold": 1.5,
+            "predictive_avoid_overheat_reduction": 0.6,
+            "prioritize_comfort_over_peak_cost": false,
+            "max_combined_preheat_boost": 1.5,
+            "high_outside_temp_threshold": 21.0,
+            "occupied_temp_reduction_high_outside": 1.0,
+            "heating_rate_degC_per_hour": 1.0,
+            "cooling_rate_factor_per_hour": 0.2
+        },
+        "modbus_port": 5024,
+        "modbus_host": "localhost"
+    }
+]

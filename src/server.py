@@ -1,15 +1,21 @@
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 import logging # For logging from scheduler
+import datetime # Added for time-based schedule logic
+import asyncio # Added asyncio
 
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler # Changed to AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from . import models, schemas, weather
+from . import models, schemas, weather, zone_simulator, modbus_client
 from .database import get_db, engine, SessionLocal # Added SessionLocal for scheduler
 from .weather import get_weather_forecast
-from .modbus_client import read_zone_data_from_modbus, write_target_temp_to_modbus # Import the modbus client function
+from .energy_pricer import get_current_energy_price # Import the energy price function
+from .control_logic import run_zone_control_logic # Import the new control logic function
+from .config import settings
+from .schemas import Zone, ZonePreferences, HistoricalSimulationRunCreate, HistoricalSimulationRunSchema, HistoricalSimulationRunInfo # Added historical schemas
+from . import historical_simulator # Import the historical simulation function
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -26,172 +32,142 @@ app = FastAPI(
 )
 
 # --- Constants for Control Logic ---
-DEFAULT_OCCUPIED_SETPOINT = 21.0
-DEFAULT_UNOCCUPIED_SETPOINT = 17.0
-WEATHER_LOCATION_FOR_CONTROL = "London" # Use a default location for now
-HIGH_OUTSIDE_TEMP_THRESHOLD = 21.0 # Celsius
-OCCUPIED_TEMP_REDUCTION_HIGH_OUTSIDE = 1.0 # Reduce target by this much if outside is warm
-MIN_TARGET_TEMP = 15.0 # Absolute minimum target temp
-MAX_TARGET_TEMP = 25.0 # Absolute maximum target temp
+# These are now mostly superseded by per-zone preferences
+# DEFAULT_OCCUPIED_SETPOINT = 21.0 # Superseded by zone.preferences.default_occupied_temp or schedule
+# DEFAULT_UNOCCUPIED_SETPOINT = 17.0 # Superseded by zone.preferences.default_unoccupied_temp or schedule
+# WEATHER_LOCATION_FOR_CONTROL = "London" # Superseded by zone.weather_location
+HIGH_OUTSIDE_TEMP_THRESHOLD = 21.0 # Celsius - Can remain global or be moved to preferences later
+OCCUPIED_TEMP_REDUCTION_HIGH_OUTSIDE = 1.0 # Reduce target by this much if outside is warm - Can remain global
+# MIN_TARGET_TEMP = 15.0 # Superseded by zone.preferences.min_target_temp
+# MAX_TARGET_TEMP = 25.0 # Superseded by zone.preferences.max_target_temp
 
 # --- Scheduler for Polling Modbus Devices ---
-scheduler = BackgroundScheduler()
+scheduler = AsyncIOScheduler() # Use AsyncIOScheduler
 
-def poll_modbus_zones_job():
-    logger.info("APScheduler job: Starting to poll Modbus zones...")
-    db: Session = SessionLocal() # Create a new session for this job
+async def poll_sensor_data_job(): # New/Reinstated polling job
+    print("Sensor data polling job started.")
+    db: Session = SessionLocal()
     try:
         zones_to_poll = db.query(models.Zone).filter(models.Zone.modbus_port != None).all()
         if not zones_to_poll:
-            logger.info("APScheduler job: No zones configured for Modbus polling.")
+            print("No zones with Modbus configuration found for polling sensor data.")
+            db.close()
             return
 
         for zone in zones_to_poll:
-            logger.info(f"APScheduler job: Polling Zone ID {zone.id} ({zone.name}) at {zone.modbus_host}:{zone.modbus_port}")
-            zone_data = read_zone_data_from_modbus(host=zone.modbus_host, port=zone.modbus_port)
-
-            if "error" in zone_data:
-                logger.error(f"APScheduler job: Error polling zone {zone.id} ({zone.name}): {zone_data['error']}")
-            else:
-                logger.info(f"APScheduler job: Successfully polled zone {zone.id} ({zone.name}). Data: {zone_data}")
-                # Save sensor data to DB
-                db_sensor_data = models.SensorData(
-                    zone_id=zone.id,
-                    temperature=zone_data["temperature"],
-                    occupancy=zone_data["occupancy"]
+            print(f"Polling sensor data for zone {zone.id} ({zone.name})")
+            try:
+                # Use a single call to read all zone data from Modbus
+                zone_data = await asyncio.to_thread(
+                    modbus_client.read_zone_data_from_modbus, zone.modbus_host, zone.modbus_port
                 )
-                db.add(db_sensor_data)
-                # We can commit per zone or once at the end.
-                # Committing per zone means if one poll fails, others are still saved.
-        db.commit() # Commit all sensor data for this polling cycle
-        logger.info("APScheduler job: Finished polling Modbus zones and saved data.")
-    except Exception as e:
-        logger.error(f"APScheduler job: An unexpected error occurred: {e}")
-        db.rollback() # Rollback in case of error during commit or other issues
-    finally:
-        db.close() # Ensure session is closed
 
-def apply_control_logic_job():
-    logger.info("APScheduler job: Applying control logic...")
-    db: Session = SessionLocal() # Create a new session for this job
+                if zone_data and "error" not in zone_data:
+                    # Ensure all expected keys are present before creating SensorData
+                    temp = zone_data.get("temperature")
+                    occupancy = zone_data.get("occupancy")
+                    heater_on = zone_data.get("heater_on")
+                    target_temp = zone_data.get("target_temperature")
+
+                    if temp is not None and occupancy is not None and heater_on is not None and target_temp is not None:
+                        sensor_entry = models.SensorData(
+                            zone_id=zone.id,
+                            temperature=temp,
+                            occupancy=occupancy,
+                            heater_on=heater_on,
+                            target_temperature=target_temp
+                        )
+                        db.add(sensor_entry)
+                        print(f"Sensor data for zone {zone.id} logged: Temp={temp}, Occ={occupancy}, Heat={heater_on}, Target={target_temp}")
+                    else:
+                        print(f"Failed to log sensor data for zone {zone.id}: Incomplete data received from Modbus. Data: {zone_data}")
+                elif zone_data and "error" in zone_data:
+                    print(f"Error polling sensor data for zone {zone.id} from Modbus: {zone_data['error']}")
+                else:
+                    print(f"Failed to read sensor data from Modbus for zone {zone.id}. No data or unexpected response.")
+
+            except Exception as e:
+                print(f"Exception while polling sensor data for zone {zone.id}: {e}")
+        
+        db.commit() # Commit all collected sensor data
+        print(f"Sensor data polling finished for {len(zones_to_poll)} zones.")
+    except Exception as e:
+        print(f"Error in sensor data polling job: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+async def run_control_logic_for_all_zones_job(): # Renamed and made async
+    print("Control logic job started.")
+    db: Session = SessionLocal()
     try:
-        zones = db.query(models.Zone).filter(models.Zone.modbus_port != None).all()
-        if not zones:
-            logger.info("APScheduler job: No zones configured for control logic.")
+        zones_with_modbus = db.query(models.Zone).filter(models.Zone.modbus_port != None).all()
+        if not zones_with_modbus:
+            print("No zones with Modbus configuration found. Skipping control logic run.")
             return
 
-        # Get weather forecast (only once per job run for efficiency)
-        # Using current day forecast for simplicity
-        weather_data = get_weather_forecast(location=WEATHER_LOCATION_FOR_CONTROL, days=1)
-        current_outside_temp = None
-        if "error" in weather_data:
-            logger.error(f"APScheduler job: Could not get weather data for {WEATHER_LOCATION_FOR_CONTROL}: {weather_data['error']}")
-        elif weather_data and 'current' in weather_data:
-            current_outside_temp = weather_data['current']['temp_c']
-            logger.info(f"APScheduler job: Current outside temp for {WEATHER_LOCATION_FOR_CONTROL}: {current_outside_temp}°C")
-        else:
-            logger.warning(f"APScheduler job: Weather data received but format unexpected.")
+        control_tasks = []
+        for zone in zones_with_modbus:
+            print(f"Queueing control logic for zone {zone.id} ({zone.name})")
+            # Schedule the async function run_zone_control_logic for each zone
+            control_tasks.append(run_zone_control_logic(db, zone.id))
+        
+        # Run all control logic tasks concurrently
+        await asyncio.gather(*control_tasks)
+        
+        db.commit() # Commit all DB changes made by control logic runs
+        print(f"Control logic executed for {len(zones_with_modbus)} zones.")
 
-        commands_to_log = [] # Collect commands to log after potential Modbus writes
-
-        for zone in zones:
-            logger.info(f"APScheduler job: Evaluating control for Zone ID {zone.id} ({zone.name})")
-            
-            # Get latest sensor data for occupancy (could also get from Modbus, but DB is source of record)
-            latest_reading = db.query(models.SensorData)\
-                               .filter(models.SensorData.zone_id == zone.id)\
-                               .order_by(models.SensorData.timestamp.desc())\
-                               .first()
-
-            if not latest_reading:
-                logger.warning(f"APScheduler job: No recent sensor data found for zone {zone.id}, skipping control.")
-                continue
-
-            is_occupied = latest_reading.occupancy
-            current_zone_temp = latest_reading.temperature
-            logger.info(f"APScheduler job: Zone {zone.id} - Occupied: {is_occupied}, Current Temp: {current_zone_temp}°C")
-
-            # --- Determine Ideal Target Temperature Based on Rules ---
-            ideal_target_temp = DEFAULT_UNOCCUPIED_SETPOINT
-            if is_occupied:
-                ideal_target_temp = DEFAULT_OCCUPIED_SETPOINT
-                # Adjust if outside temp is high
-                if current_outside_temp is not None and current_outside_temp > HIGH_OUTSIDE_TEMP_THRESHOLD:
-                    ideal_target_temp -= OCCUPIED_TEMP_REDUCTION_HIGH_OUTSIDE
-                    logger.info(f"APScheduler job: Zone {zone.id} - Reducing target due to high outside temp. New ideal: {ideal_target_temp}°C")
-            
-            # Apply absolute limits
-            ideal_target_temp = max(MIN_TARGET_TEMP, min(MAX_TARGET_TEMP, ideal_target_temp))
-            ideal_target_temp = round(ideal_target_temp, 1) # Round to one decimal place
-
-            # --- Compare with Actual Target on Device and Command if Needed ---
-            # Read current state directly from Modbus device to get its actual current target
-            modbus_data = read_zone_data_from_modbus(host=zone.modbus_host, port=zone.modbus_port)
-
-            if "error" in modbus_data:
-                logger.error(f"APScheduler job: Failed to read current state from Modbus for zone {zone.id}: {modbus_data['error']}")
-                continue # Skip control for this zone if we can't read it
-            
-            current_device_target_temp = modbus_data.get("target_temperature")
-            logger.info(f"APScheduler job: Zone {zone.id} - Ideal Target: {ideal_target_temp}°C, Device Target: {current_device_target_temp}°C")
-
-            if current_device_target_temp is None:
-                 logger.error(f"APScheduler job: Could not read target temperature from device for zone {zone.id}.")
-                 continue
-
-            # Check if the target needs changing (allow for small float differences)
-            if abs(ideal_target_temp - current_device_target_temp) > 0.01:
-                logger.info(f"APScheduler job: Zone {zone.id} - Target mismatch detected. Sending command to set target to {ideal_target_temp}°C.")
-                write_result = write_target_temp_to_modbus(host=zone.modbus_host, port=zone.modbus_port, target_temp=ideal_target_temp)
-                
-                if "error" in write_result:
-                    logger.error(f"APScheduler job: Failed to write target temperature to Modbus for zone {zone.id}: {write_result['error']}")
-                else:
-                    logger.info(f"APScheduler job: Successfully wrote target temperature {ideal_target_temp}°C to zone {zone.id}.")
-                    # Prepare command to log in DB after successful write
-                    commands_to_log.append(models.Command(zone_id=zone.id, target_temp=ideal_target_temp))
-            else:
-                 logger.info(f"APScheduler job: Zone {zone.id} - Target temperature already matches ideal ({ideal_target_temp}°C). No command sent.")
-
-        # Add and commit all logged commands
-        if commands_to_log:
-            db.add_all(commands_to_log)
-            db.commit()
-            logger.info(f"APScheduler job: Logged {len(commands_to_log)} commands to database.")
-        else:
-             logger.info("APScheduler job: No commands needed logging this cycle.")
-
-        logger.info("APScheduler job: Finished applying control logic.")
     except Exception as e:
-        logger.exception(f"APScheduler job: An unexpected error occurred in control logic: {e}") # Use logger.exception for traceback
-        db.rollback() # Rollback in case of error
+        print(f"Error in control logic job: {e}")
+        db.rollback() # Rollback in case of error during the batch processing
     finally:
-        db.close() # Ensure session is closed
+        db.close()
+    print("Control logic job finished.")
 
 @app.on_event("startup")
-def startup_event():
+async def startup_event(): # Made startup event async
     logger.info("FastAPI application startup...")
-    # --- Add Polling Job --- 
-    scheduler.add_job(
-        poll_modbus_zones_job, 
-        trigger=IntervalTrigger(seconds=30), # Poll every 30 seconds
-        id="poll_modbus_zones", 
-        name="Poll Modbus Zones Regularly",
-        replace_existing=True
-    )
-    # --- Add Control Logic Job --- 
-    scheduler.add_job(
-        apply_control_logic_job, 
-        trigger=IntervalTrigger(minutes=1), # Apply logic every 1 minute (adjust as needed)
-        id="apply_control_logic", 
-        name="Apply Control Logic Regularly",
-        replace_existing=True
-    )
+    db = SessionLocal()
+    zones = db.query(models.Zone).all()
+    for zone_model in zones:
+        if zone_model.modbus_port: # Only start if port is defined
+            print(f"Starting Modbus simulator for Zone {zone_model.id} ({zone_model.name}) on port {zone_model.modbus_port}")
+            # Initial values can be fetched from DB or defaults
+            initial_temp = 20.0
+            initial_target = 22.0 # This will be passed as initial_target_temp
+            initial_occupancy_val = False # This will be passed as initial_occupancy
+            
+            latest_sensor = db.query(models.SensorData).filter(models.SensorData.zone_id == zone_model.id).order_by(models.SensorData.timestamp.desc()).first()
+            if latest_sensor:
+                initial_temp = latest_sensor.temperature
+                if latest_sensor.target_temperature is not None: initial_target = latest_sensor.target_temperature
+                initial_occupancy_val = latest_sensor.occupancy
+
+            sim = zone_simulator.ZoneSimulator(
+                zone_id=zone_model.id, 
+                name=zone_model.name, # Added name argument
+                modbus_port=zone_model.modbus_port, # Added modbus_port argument
+                initial_temp=initial_temp,
+                initial_target_temp=initial_target, # Corrected to initial_target_temp
+                initial_occupancy=initial_occupancy_val # Corrected to initial_occupancy
+                # host argument removed as it's not in ZoneSimulator.__init__
+            )
+            # asyncio.create_task(sim.run_simulation_loop()) # Start the simulation loop - this was from an older version
+            # The ZoneSimulator's start method should handle threading internally.
+            sim.start() # Start the simulator (which starts its own threads for simulation and Modbus)
+            print(f"Zone {zone_model.id} ({zone_model.name}) simulator started.")
+    db.close()
+
+    # Add the sensor data polling job
+    scheduler.add_job(poll_sensor_data_job, IntervalTrigger(seconds=30), id="poll_sensor_data")
+    # Add the control logic job
+    scheduler.add_job(run_control_logic_for_all_zones_job, IntervalTrigger(seconds=60), id="control_logic_all_zones")
     scheduler.start()
-    logger.info("APScheduler started with polling and control jobs.")
+    logger.info("APScheduler started with sensor polling and control logic jobs.")
 
 @app.on_event("shutdown")
-def shutdown_event():
+async def shutdown_event(): # Made shutdown event async
     logger.info("FastAPI application shutdown...")
     scheduler.shutdown()
     logger.info("APScheduler shut down.")
@@ -199,20 +175,26 @@ def shutdown_event():
 # --- CRUD for Zones ---
 @app.post("/zones/", response_model=schemas.Zone, tags=["Zones"])
 def create_zone(zone: schemas.ZoneCreate, db: Session = Depends(get_db)):
-    db_zone = db.query(models.Zone).filter(models.Zone.name == zone.name).first()
-    if db_zone:
+    db_zone_by_name = db.query(models.Zone).filter(models.Zone.name == zone.name).first()
+    if db_zone_by_name:
         raise HTTPException(status_code=400, detail="Zone name already registered")
     
-    # Check for modbus_port uniqueness if a port is provided
     if zone.modbus_port is not None:
         existing_port = db.query(models.Zone).filter(models.Zone.modbus_port == zone.modbus_port).first()
         if existing_port:
             raise HTTPException(status_code=400, detail=f"Modbus port {zone.modbus_port} is already in use.")
 
+    # Preferences will be passed as a Pydantic model (schemas.ZonePreferences) 
+    # and needs to be converted to a dict for JSON storage if not handled automatically by SQLAlchemy JSON type.
+    # SQLAlchemy's JSON type usually handles dicts directly.
     new_zone = models.Zone(
         name=zone.name, 
-        preferences=zone.preferences,
-        modbus_port=zone.modbus_port,
+        weather_location=zone.weather_location, 
+        latitude=zone.latitude,                 
+        longitude=zone.longitude,               
+        # preferences=zone.preferences.model_dump() if zone.preferences else None, # Convert Pydantic model to dict
+        preferences=zone.preferences.model_dump(exclude_unset=False) if zone.preferences else ZonePreferences().model_dump(exclude_unset=False),
+        modbus_port=zone.modbus_port, 
         modbus_host=zone.modbus_host
     )
     db.add(new_zone)
@@ -230,6 +212,60 @@ def read_zone(zone_id: int, db: Session = Depends(get_db)):
     db_zone = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
     if db_zone is None:
         raise HTTPException(status_code=404, detail="Zone not found")
+    return db_zone
+
+@app.put("/zones/{zone_id}", response_model=schemas.Zone, tags=["Zones"])
+def update_zone(zone_id: int, zone_update_data: schemas.ZoneUpdate, db: Session = Depends(get_db)):
+    db_zone = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
+    if db_zone is None:
+        raise HTTPException(status_code=404, detail="Zone not found")
+
+    update_data = zone_update_data.model_dump(exclude_unset=True) # Get only provided fields
+
+    if "name" in update_data and update_data["name"] != db_zone.name:
+        existing_name_zone = db.query(models.Zone).filter(models.Zone.name == update_data["name"]).first()
+        if existing_name_zone:
+            raise HTTPException(status_code=400, detail="Zone name already registered by another zone.")
+        db_zone.name = update_data["name"]
+
+    if "modbus_port" in update_data and update_data["modbus_port"] is not None and update_data["modbus_port"] != db_zone.modbus_port:
+        existing_port_zone = db.query(models.Zone).filter(models.Zone.modbus_port == update_data["modbus_port"]).first()
+        if existing_port_zone:
+            raise HTTPException(status_code=400, detail=f"Modbus port {update_data['modbus_port']} is already in use by another zone.")
+        db_zone.modbus_port = update_data["modbus_port"]
+    elif "modbus_port" in update_data and update_data["modbus_port"] is None:
+        db_zone.modbus_port = None # Allow unsetting the port
+
+    if "weather_location" in update_data:
+        db_zone.weather_location = update_data["weather_location"]
+
+    if "modbus_host" in update_data:
+        db_zone.modbus_host = update_data["modbus_host"]
+
+    if "latitude" in update_data:
+        db_zone.latitude = update_data["latitude"]
+    
+    if "longitude" in update_data:
+        db_zone.longitude = update_data["longitude"]
+
+    if "preferences" in update_data and update_data["preferences"] is not None:
+        # update_data["preferences"] is already a dict from zone_update_data.model_dump()
+        # Ensure it's a full representation if it came from a partial Pydantic model
+        # One way is to load it into the Pydantic model and dump it again fully.
+        try:
+            loaded_prefs = schemas.ZonePreferences(**update_data["preferences"])
+            db_zone.preferences = loaded_prefs.model_dump(exclude_unset=False)
+        except Exception as e:
+            # Handle error if dict can't be loaded into ZonePreferences, though FastAPI should validate upstream
+            print(f"Error processing preferences in update_zone: {e}. Preferences not updated.")
+            # Optionally raise HTTPException
+            pass 
+    elif "preferences" in update_data and update_data["preferences"] is None:
+        # Allow explicitly setting preferences to None (or default)
+        db_zone.preferences = schemas.ZonePreferences().model_dump(exclude_unset=False) # Set to default
+
+    db.commit()
+    db.refresh(db_zone)
     return db_zone
 
 # --- Weather Endpoint ---
@@ -332,6 +368,157 @@ def read_zone_with_details(zone_id: int, db: Session = Depends(get_db)):
     # The relationships in models.Zone (sensor_data, commands) should be automatically 
     # populated by SQLAlchemy if accessed, and Pydantic will handle serialization.
     return db_zone
+
+# --- Energy Pricer Endpoint ---
+@app.get("/energy/current_price", response_model=Dict[str, Any], tags=["Energy"])
+async def read_current_energy_price():
+    """
+    Get the current simulated energy price information.
+    """
+    price_info = get_current_energy_price()
+    if "error" in price_info:
+        raise HTTPException(status_code=500, detail=price_info["error"])
+    return price_info
+
+@app.post("/zones/{zone_id}/trigger_control_logic", response_model=schemas.Zone, tags=["Control Logic"], summary="Trigger Control Logic for a Zone")
+async def trigger_control_logic_for_zone(zone_id: int, db: Session = Depends(get_db)):
+    """
+    Manually triggers the control logic for a specific zone.
+    This is useful for testing and forcing an immediate control decision.
+    The control logic will run based on the latest sensor data and current preferences.
+    """
+    db_zone = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
+    if not db_zone:
+        raise HTTPException(status_code=404, detail="Zone not found")
+
+    if not db_zone.modbus_host or db_zone.modbus_port is None:
+        # Although run_zone_control_logic also checks this, good to have an early exit
+        raise HTTPException(status_code=400, detail=f"Zone {zone_id} does not have Modbus configuration. Cannot trigger control logic.")
+
+    try:
+        logger.info(f"Manual trigger for control logic received for zone {zone_id} ({db_zone.name}).")
+        # Ensure the db session is passed correctly and handled within run_zone_control_logic
+        # run_zone_control_logic is async and expects the db session.
+        # It also handles its own commits/rollbacks internally if called standalone, 
+        # but when called from scheduler, the scheduler job handles the commit.
+        # For a manual trigger, we need to ensure the session is committed if changes are made.
+        
+        # Create a new session for this specific operation to avoid conflicts with scheduler
+        # or pass the existing one and rely on its commit/close cycle if this endpoint is simple.
+        # Given run_zone_control_logic itself doesn't commit (expects caller/scheduler to), we should commit here.
+        
+        await run_zone_control_logic(db, zone_id) # db is already a valid session from Depends(get_db)
+        db.commit() # Commit any changes made by the control logic (like logging commands)
+        logger.info(f"Control logic manually triggered and completed for zone {zone_id}.")
+        
+        # Refresh the zone data to return the latest state including any new commands/sensor data if applicable immediately
+        db.refresh(db_zone) # Refresh might not show immediate Modbus changes unless polling has run
+        return db_zone
+    except Exception as e:
+        logger.error(f"Error during manual trigger of control logic for zone {zone_id}: {e}", exc_info=True)
+        db.rollback() # Rollback on error
+        raise HTTPException(status_code=500, detail=f"Failed to trigger control logic: {str(e)}")
+
+# --- Historical Simulation API Endpoints ---
+
+@app.post("/zones/{zone_id}/historical_simulations/", 
+          response_model=schemas.HistoricalSimulationRunInfo, # Return info about the created run
+          status_code=202, # Accepted status code for background task
+          tags=["Historical Simulation"],
+          summary="Start a Historical Simulation for a Zone")
+async def create_historical_simulation(
+    zone_id: int,
+    run_request: schemas.HistoricalSimulationRunCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """
+    Triggers a historical simulation for the specified zone and date range.
+    
+    - The simulation runs in the background.
+    - Returns information about the simulation run task that was initiated.
+    - Use other endpoints to check status and retrieve results.
+    """
+    db_zone = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
+    if not db_zone:
+        raise HTTPException(status_code=404, detail="Zone not found")
+        
+    if not db_zone.latitude or not db_zone.longitude:
+        raise HTTPException(status_code=400, detail="Zone is missing latitude/longitude required for historical weather data.")
+
+    # Create the initial run entry in the database
+    new_run = models.HistoricalSimulationRun(
+        zone_id=zone_id,
+        sim_period_start=run_request.sim_period_start,
+        sim_period_end=run_request.sim_period_end,
+        status="PENDING"
+    )
+    db.add(new_run)
+    db.commit()
+    db.refresh(new_run)
+
+    # Add the actual simulation function to run in the background
+    background_tasks.add_task(
+        historical_simulator.run_historical_simulation_for_zone,
+        zone_id=zone_id,
+        run_id=new_run.id,
+        sim_start_date_str=run_request.sim_period_start,
+        sim_end_date_str=run_request.sim_period_end
+    )
+    
+    logger.info(f"Queued historical simulation run ID {new_run.id} for zone {zone_id}.")
+    
+    # Return info about the accepted task
+    return new_run # Pydantic will serialize using HistoricalSimulationRunInfo
+
+@app.get("/zones/{zone_id}/historical_simulations/", 
+         response_model=List[schemas.HistoricalSimulationRunInfo], 
+         tags=["Historical Simulation"],
+         summary="List Historical Simulation Runs for a Zone")
+async def list_historical_simulations_for_zone(zone_id: int, db: Session = Depends(get_db)):
+    """
+    Retrieves a list of all historical simulation runs initiated for a specific zone.
+    Does not include the detailed data points.
+    """
+    db_zone = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
+    if not db_zone:
+        raise HTTPException(status_code=404, detail="Zone not found")
+        
+    # Construct query without explicit line continuation by chaining
+    runs = (db.query(models.HistoricalSimulationRun)
+            .filter(models.HistoricalSimulationRun.zone_id == zone_id)
+            .order_by(models.HistoricalSimulationRun.requested_at_utc.desc())
+            .all())
+    return runs
+
+@app.get("/historical_simulations/{run_id}", 
+         response_model=schemas.HistoricalSimulationRunSchema, 
+         tags=["Historical Simulation"],
+         summary="Get Details of a Specific Historical Simulation Run")
+async def get_historical_simulation_run_details(run_id: int, db: Session = Depends(get_db)):
+    """
+    Retrieves the full details of a specific historical simulation run, 
+    including its status and all associated data points.
+    Warning: This might return a large amount of data for long simulations.
+    """
+    # Import orm here as it's only used in this function
+    from sqlalchemy import orm 
+    
+    # Construct query without explicit line continuation by chaining
+    run = (db.query(models.HistoricalSimulationRun)
+           .options(orm.selectinload(models.HistoricalSimulationRun.data_points)) # Eager load data points
+           .filter(models.HistoricalSimulationRun.id == run_id)
+           .first())
+            
+    if not run:
+        raise HTTPException(status_code=404, detail="Historical simulation run not found")
+        
+    # Check if data points are loaded; if not, manually load them if needed
+    # This depends on relationship loading strategy. selectinload is usually good.
+    # If lazy loading is default, access run.data_points here to trigger load before return.
+    _ = run.data_points # Access to potentially trigger lazy load if not eager loaded
+        
+    return run
 
 # To run the server (from the project root directory):
 # uvicorn src.server:app --reload 
